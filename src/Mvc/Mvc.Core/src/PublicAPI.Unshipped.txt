@@ -1,1 +1,3 @@
 #nullable enable
+Microsoft.AspNetCore.Mvc.ModelBinding.Validation.IObjectModelValidator.ValidateAsync(Microsoft.AspNetCore.Mvc.ActionContext! actionContext, Microsoft.AspNetCore.Mvc.ModelBinding.Validation.ValidationStateDictionary? validationState, string! prefix, object? model, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.Task!
+virtual Microsoft.AspNetCore.Mvc.ModelBinding.Validation.ValidationVisitor.ValidateNodeAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<bool>

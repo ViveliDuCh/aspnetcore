@@ -88,7 +88,9 @@ public abstract class ValidatableParameterInfo : IValidatableInfo
             var attribute = validationAttributes[i];
             try
             {
-                var result = attribute.GetValidationResult(value, context.ValidationContext);
+                var result = attribute is AsyncValidationAttribute asyncAttr
+                    ? await asyncAttr.GetValidationResultAsync(value, context.ValidationContext, cancellationToken)
+                    : attribute.GetValidationResult(value, context.ValidationContext);
                 if (result is not null && result != ValidationResult.Success && result.ErrorMessage is not null)
                 {
                     var key = string.IsNullOrEmpty(context.CurrentValidationPath) ? Name : $"{context.CurrentValidationPath}.{Name}";

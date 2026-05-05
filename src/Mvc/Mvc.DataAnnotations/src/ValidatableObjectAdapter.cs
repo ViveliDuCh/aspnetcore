@@ -7,7 +7,7 @@ using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
 
 namespace Microsoft.AspNetCore.Mvc.DataAnnotations;
 
-internal sealed class ValidatableObjectAdapter : IModelValidator
+internal sealed class ValidatableObjectAdapter : IModelValidator, IAsyncModelValidator
 {
     public IEnumerable<ModelValidationResult> Validate(ModelValidationContext context)
     {
@@ -40,6 +40,49 @@ internal sealed class ValidatableObjectAdapter : IModelValidator
         };
 
         return ConvertResults(validatable.Validate(validationContext));
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<IReadOnlyList<ModelValidationResult>> ValidateAsync(
+        ModelValidationContext context,
+        CancellationToken cancellationToken = default)
+    {
+        var model = context.Model;
+        if (model is null)
+        {
+            return Array.Empty<ModelValidationResult>();
+        }
+
+        var validationContext = new ValidationContext(
+            instance: model,
+            serviceProvider: context.ActionContext?.HttpContext?.RequestServices,
+            items: null)
+        {
+            DisplayName = context.ModelMetadata.GetDisplayName(),
+            MemberName = context.ModelMetadata.Name,
+        };
+
+        IEnumerable<ValidationResult> validationResults;
+        if (model is IAsyncValidatableObject asyncValidatable)
+        {
+            validationResults = await asyncValidatable.ValidateAsync(
+                validationContext,
+                cancellationToken);
+        }
+        else if (model is IValidatableObject validatable)
+        {
+            validationResults = validatable.Validate(validationContext);
+        }
+        else
+        {
+            var message = Resources.FormatValidatableObjectAdapter_IncompatibleType(
+                typeof(IValidatableObject).Name,
+                model.GetType());
+
+            throw new InvalidOperationException(message);
+        }
+
+        return ConvertResults(validationResults).ToList();
     }
 
     private static IEnumerable<ModelValidationResult> ConvertResults(IEnumerable<ValidationResult> results)

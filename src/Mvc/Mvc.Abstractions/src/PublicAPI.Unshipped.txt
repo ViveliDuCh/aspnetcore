@@ -1,3 +1,5 @@
 #nullable enable
 Microsoft.AspNetCore.Mvc.ApiExplorer.ApiDescription.RoutePattern.get -> Microsoft.AspNetCore.Routing.Patterns.RoutePattern?
 Microsoft.AspNetCore.Mvc.ApiExplorer.ApiDescription.RoutePattern.set -> void
+Microsoft.AspNetCore.Mvc.ModelBinding.Validation.IAsyncModelValidator
+Microsoft.AspNetCore.Mvc.ModelBinding.Validation.IAsyncModelValidator.ValidateAsync(Microsoft.AspNetCore.Mvc.ModelBinding.Validation.ModelValidationContext! context, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<System.Collections.Generic.IReadOnlyList<Microsoft.AspNetCore.Mvc.ModelBinding.Validation.ModelValidationResult!>!>

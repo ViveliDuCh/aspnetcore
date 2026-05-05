@@ -53,3 +53,9 @@ mono_crash.*.blob
 
 # Agentic workflow log artifacts
 .github/workflows/.github/aw/logs/
+
+# Copilot agent MCP configuration
+agency.toml
+
+# Local launch profiles (VS auto-generated, developer-specific)
+**/Properties/launchSettings.json

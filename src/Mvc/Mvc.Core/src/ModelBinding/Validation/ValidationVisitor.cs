@@ -254,6 +254,68 @@ public class ValidationVisitor
     }
 
     /// <summary>
+    /// Validates a single node in a model object graph asynchronously,
+    /// supporting <see cref="IAsyncModelValidator"/> implementations.
+    /// </summary>
+    /// <param name="cancellationToken">The <see cref="CancellationToken"/> to observe.</param>
+    /// <returns><c>true</c> if the node is valid, otherwise <c>false</c>.</returns>
+    protected virtual async ValueTask<bool> ValidateNodeAsync(CancellationToken cancellationToken = default)
+    {
+        Debug.Assert(Key != null);
+        Debug.Assert(Metadata != null);
+        var state = ModelState.GetValidationState(Key);
+
+        if (state != ModelValidationState.Invalid)
+        {
+            var validators = Cache.GetValidators(Metadata, ValidatorProvider);
+
+            var count = validators.Count;
+            if (count > 0)
+            {
+                var context = new ModelValidationContext(
+                    Context,
+                    Metadata!,
+                    MetadataProvider,
+                    Container,
+                    Model);
+
+                var results = new List<ModelValidationResult>();
+                for (var i = 0; i < count; i++)
+                {
+                    if (validators[i] is IAsyncModelValidator asyncValidator)
+                    {
+                        var asyncResults = await asyncValidator.ValidateAsync(context, cancellationToken);
+                        results.AddRange(asyncResults);
+                    }
+                    else
+                    {
+                        results.AddRange(validators[i].Validate(context));
+                    }
+                }
+
+                var resultsCount = results.Count;
+                for (var i = 0; i < resultsCount; i++)
+                {
+                    var result = results[i];
+                    var key = ModelNames.CreatePropertyModelName(Key, result.MemberName);
+                    ModelState.TryAddModelError(key, result.Message);
+                }
+            }
+        }
+
+        state = ModelState.GetFieldValidationState(Key);
+        if (state == ModelValidationState.Invalid)
+        {
+            return false;
+        }
+        else
+        {
+            ModelState[Key]?.ValidationState = ModelValidationState.Valid;
+            return true;
+        }
+    }
+
+    /// <summary>
     /// Validate something in a model.
     /// </summary>
     /// <param name="metadata">The model metadata.</param>

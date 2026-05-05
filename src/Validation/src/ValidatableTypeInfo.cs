@@ -87,7 +87,7 @@ public abstract class ValidatableTypeInfo : IValidatableInfo
             }
 
             // Validate type-level attributes
-            ValidateTypeAttributes(value, context);
+            await ValidateTypeAttributesAsync(value, context, cancellationToken);
 
             // If any type-level attribute errors were found, return early
             if (context.ValidationErrors is not null && context.ValidationErrors.Count > originalErrorCount)
@@ -96,7 +96,7 @@ public abstract class ValidatableTypeInfo : IValidatableInfo
             }
 
             // Finally validate IValidatableObject if implemented
-            ValidateValidatableObjectInterface(value, context);
+            await ValidateValidatableObjectInterfaceAsync(value, context, cancellationToken);
         }
         finally
         {
@@ -122,7 +122,7 @@ public abstract class ValidatableTypeInfo : IValidatableInfo
         }
     }
 
-    private void ValidateTypeAttributes(object? value, ValidateContext context)
+    private async Task ValidateTypeAttributesAsync(object? value, ValidateContext context, CancellationToken cancellationToken)
     {
         var validationAttributes = GetValidationAttributes();
         var errorPrefix = context.CurrentValidationPath;
@@ -130,7 +130,9 @@ public abstract class ValidatableTypeInfo : IValidatableInfo
         for (var i = 0; i < validationAttributes.Length; i++)
         {
             var attribute = validationAttributes[i];
-            var result = attribute.GetValidationResult(value, context.ValidationContext);
+            var result = attribute is AsyncValidationAttribute asyncAttr
+                ? await asyncAttr.GetValidationResultAsync(value, context.ValidationContext, cancellationToken)
+                : attribute.GetValidationResult(value, context.ValidationContext);
             if (result is not null && result != ValidationResult.Success && result.ErrorMessage is not null)
             {
                 // Create a validation error for each member name that is provided
@@ -149,9 +151,45 @@ public abstract class ValidatableTypeInfo : IValidatableInfo
         }
     }
 
-    private void ValidateValidatableObjectInterface(object? value, ValidateContext context)
+    private async Task ValidateValidatableObjectInterfaceAsync(object? value, ValidateContext context, CancellationToken cancellationToken)
     {
-        if (Type.ImplementsInterface(typeof(IValidatableObject)) && value is IValidatableObject validatable)
+        if (value is IAsyncValidatableObject asyncValidatable)
+        {
+            // Important: Set the DisplayName to the type name for top-level validations
+            // and restore the original validation context properties
+            var originalDisplayName = context.ValidationContext.DisplayName;
+            var originalMemberName = context.ValidationContext.MemberName;
+            var errorPrefix = context.CurrentValidationPath;
+
+            // Set the display name to the class name for IValidatableObject validation
+            context.ValidationContext.DisplayName = Type.Name;
+            context.ValidationContext.MemberName = null;
+
+            var validationResults = await asyncValidatable.ValidateAsync(context.ValidationContext, cancellationToken);
+            foreach (var validationResult in validationResults)
+            {
+                if (validationResult != ValidationResult.Success && validationResult.ErrorMessage is not null)
+                {
+                    // Create a validation error for each member name that is provided
+                    foreach (var memberName in validationResult.MemberNames)
+                    {
+                        var key = string.IsNullOrEmpty(errorPrefix) ? memberName : $"{errorPrefix}.{memberName}";
+                        context.AddOrExtendValidationError(memberName, key, validationResult.ErrorMessage, value);
+                    }
+
+                    if (!validationResult.MemberNames.Any())
+                    {
+                        // If no member names are specified, then treat this as a top-level error
+                        context.AddOrExtendValidationError(string.Empty, string.Empty, validationResult.ErrorMessage, value);
+                    }
+                }
+            }
+
+            // Restore the original validation context properties
+            context.ValidationContext.DisplayName = originalDisplayName;
+            context.ValidationContext.MemberName = originalMemberName;
+        }
+        else if (Type.ImplementsInterface(typeof(IValidatableObject)) && value is IValidatableObject validatable)
         {
             // Important: Set the DisplayName to the type name for top-level validations
             // and restore the original validation context properties

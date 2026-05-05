@@ -168,6 +168,37 @@ public class ValidatableObjectAdapterTest
         Assert.Equal(expectedResults, results, ModelValidationResultComparer.Instance);
     }
 
+    [Fact]
+    public async Task ValidateAsync_UsesIAsyncValidatableObject()
+    {
+        // Arrange
+        var adapter = new ValidatableObjectAdapter();
+        var model = new AsyncSampleModel();
+        model.ValidationResults.Add(new ValidationResult("Async error", new[] { nameof(SampleModel.FirstName) }));
+
+        var metadata = _metadataProvider.GetMetadataForProperty(
+            typeof(SampleModelContainer),
+            nameof(SampleModelContainer.SampleModel));
+        var validationContext = new ModelValidationContext(
+            new ActionContext(),
+            metadata,
+            _metadataProvider,
+            container: null,
+            model: model);
+        var cancellationToken = new CancellationToken(canceled: false);
+
+        // Act
+        var results = await adapter.ValidateAsync(validationContext, cancellationToken);
+
+        // Assert
+        Assert.True(model.ValidateAsyncCalled);
+        Assert.False(model.ValidateCalled);
+        Assert.Equal(cancellationToken, model.CancellationToken);
+        var result = Assert.Single(results);
+        Assert.Equal(nameof(SampleModel.FirstName), result.MemberName);
+        Assert.Equal("Async error", result.Message);
+    }
+
     private class SampleModel : IValidatableObject
     {
         // "Real" properties.
@@ -197,13 +228,38 @@ public class ValidatableObjectAdapterTest
 
         // IValidatableObject for realz.
 
-        public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+        public virtual IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
         {
             DisplayName = validationContext.DisplayName;
             MemberName = validationContext.MemberName;
             ObjectInstance = validationContext.ObjectInstance;
 
             return ValidationResults;
+        }
+    }
+
+    private sealed class AsyncSampleModel : SampleModel, IAsyncValidatableObject
+    {
+        public CancellationToken CancellationToken { get; private set; }
+
+        public bool ValidateAsyncCalled { get; private set; }
+
+        public bool ValidateCalled { get; private set; }
+
+        public async ValueTask<IEnumerable<ValidationResult>> ValidateAsync(
+            ValidationContext validationContext,
+            CancellationToken cancellationToken = default)
+        {
+            await Task.Yield();
+            CancellationToken = cancellationToken;
+            ValidateAsyncCalled = true;
+            return ValidationResults;
+        }
+
+        public override IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+        {
+            ValidateCalled = true;
+            return base.Validate(validationContext);
         }
     }
 

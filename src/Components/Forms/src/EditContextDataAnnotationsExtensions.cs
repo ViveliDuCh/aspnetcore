@@ -67,7 +67,7 @@ public static partial class EditContextDataAnnotationsExtensions
                 : null;
 #pragma warning restore ASP0029 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
             _editContext.OnFieldChanged += OnFieldChanged;
-            _editContext.OnValidationRequested += OnValidationRequested;
+            _editContext.OnAsyncValidationRequested += OnAsyncValidationRequested;
 
             if (MetadataUpdater.IsSupported)
             {
@@ -115,10 +115,54 @@ public static partial class EditContextDataAnnotationsExtensions
         }
 
         [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Model types are expected to be defined in assemblies that do not get trimmed.")]
+        private async Task OnAsyncValidationRequested(object? sender, ValidationRequestedEventArgs e)
+        {
+            var validationContext = new ValidationContext(_editContext.Model, _serviceProvider, items: null);
+
+            if (!await TryValidateTypeInfoAsync(validationContext))
+            {
+                await ValidateWithDefaultValidatorAsync(validationContext);
+            }
+
+            _editContext.NotifyValidationStateChanged();
+        }
+
+        [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Model types are expected to be defined in assemblies that do not get trimmed.")]
         private void ValidateWithDefaultValidator(ValidationContext validationContext)
         {
             var validationResults = new List<ValidationResult>();
             Validator.TryValidateObject(_editContext.Model, validationContext, validationResults, true);
+
+            // Transfer results to the ValidationMessageStore
+            _messages.Clear();
+            foreach (var validationResult in validationResults)
+            {
+                if (validationResult == null)
+                {
+                    continue;
+                }
+
+                var hasMemberNames = false;
+                foreach (var memberName in validationResult.MemberNames)
+                {
+                    hasMemberNames = true;
+                    _messages.Add(_editContext.Field(memberName), validationResult.ErrorMessage!);
+                }
+
+                if (!hasMemberNames)
+                {
+                    _messages.Add(new FieldIdentifier(_editContext.Model, fieldName: string.Empty), validationResult.ErrorMessage!);
+                }
+            }
+        }
+
+        [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Model types are expected to be defined in assemblies that do not get trimmed.")]
+        private async Task ValidateWithDefaultValidatorAsync(ValidationContext validationContext)
+        {
+            var validationResults = new List<ValidationResult>();
+            await Validator.TryValidateObjectAsync(
+                _editContext.Model, validationContext, validationResults,
+                validateAllProperties: true, CancellationToken.None);
 
             // Transfer results to the ValidationMessageStore
             _messages.Clear();
@@ -191,19 +235,62 @@ public static partial class EditContextDataAnnotationsExtensions
             }
 
             return true;
-
         }
+
+#pragma warning disable ASP0029 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
+        private async Task<bool> TryValidateTypeInfoAsync(ValidationContext validationContext)
+        {
+            if (_validatorTypeInfo is null)
+            {
+                return false;
+            }
+
+            var validateContext = new ValidateContext
+            {
+                ValidationOptions = _validationOptions!,
+                ValidationContext = validationContext,
+            };
+            try
+            {
+                validateContext.OnValidationError += AddMapping;
+
+                await _validatorTypeInfo.ValidateAsync(_editContext.Model, validateContext, CancellationToken.None);
+
+                var validationErrors = validateContext.ValidationErrors;
+
+                // Transfer results to the ValidationMessageStore
+                _messages.Clear();
+
+                if (validationErrors is not null && validationErrors.Count > 0)
+                {
+                    foreach (var (fieldKey, messages) in validationErrors)
+                    {
+                        var fieldIdentifier = _validationPathToFieldIdentifierMapping[fieldKey];
+                        _messages.Add(fieldIdentifier, messages);
+                    }
+                }
+            }
+            finally
+            {
+                validateContext.OnValidationError -= AddMapping;
+                _validationPathToFieldIdentifierMapping.Clear();
+            }
+
+            return true;
+        }
+
         private void AddMapping(ValidationErrorContext context)
         {
             _validationPathToFieldIdentifierMapping[context.Path] =
                 new FieldIdentifier(context.Container ?? _editContext.Model, context.Name);
         }
+#pragma warning restore ASP0029
 
         public void Dispose()
         {
             _messages.Clear();
             _editContext.OnFieldChanged -= OnFieldChanged;
-            _editContext.OnValidationRequested -= OnValidationRequested;
+            _editContext.OnAsyncValidationRequested -= OnAsyncValidationRequested;
             _editContext.NotifyValidationStateChanged();
 
             if (MetadataUpdater.IsSupported)

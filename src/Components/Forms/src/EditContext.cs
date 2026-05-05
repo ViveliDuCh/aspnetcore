@@ -220,6 +220,30 @@ public sealed class EditContext
         return !GetValidationMessages().Any();
     }
 
+    /// <summary>
+    /// Validates this <see cref="EditContext"/> asynchronously, supporting
+    /// async validation attributes and async validatable objects.
+    /// </summary>
+    /// <returns>True if there are no validation messages after validation; otherwise false.</returns>
+    public async Task<bool> ValidateAsync()
+    {
+        if (OnAsyncValidationRequested is not null)
+        {
+            await OnAsyncValidationRequested.Invoke(this, ValidationRequestedEventArgs.Empty);
+        }
+        else
+        {
+            OnValidationRequested?.Invoke(this, ValidationRequestedEventArgs.Empty);
+        }
+
+        return !GetValidationMessages().Any();
+    }
+
+    /// <summary>
+    /// An event that is raised when async validation is requested.
+    /// </summary>
+    public Func<object?, ValidationRequestedEventArgs, Task>? OnAsyncValidationRequested;
+
     internal FieldState? GetFieldState(in FieldIdentifier fieldIdentifier)
     {
         _fieldStates.TryGetValue(fieldIdentifier, out var state);

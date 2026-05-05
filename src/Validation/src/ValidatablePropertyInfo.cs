@@ -92,7 +92,7 @@ public abstract class ValidatablePropertyInfo : IValidatableInfo
         }
 
         // Validate any other attributes
-        ValidateValue(propertyValue, Name, context.CurrentValidationPath, validationAttributes, value);
+        await ValidateValueAsync(propertyValue, Name, context.CurrentValidationPath, validationAttributes, value, cancellationToken);
 
         // Check if we've reached the maximum depth before validating complex properties
         if (context.CurrentDepth >= context.ValidationOptions.MaxDepth)
@@ -150,14 +150,16 @@ public abstract class ValidatablePropertyInfo : IValidatableInfo
             context.CurrentValidationPath = originalPrefix;
         }
 
-        void ValidateValue(object? val, string name, string errorPrefix, ValidationAttribute[] validationAttributes, object? container)
+        async ValueTask ValidateValueAsync(object? val, string name, string errorPrefix, ValidationAttribute[] validationAttributes, object? container, CancellationToken ct)
         {
             for (var i = 0; i < validationAttributes.Length; i++)
             {
                 var attribute = validationAttributes[i];
                 try
                 {
-                    var result = attribute.GetValidationResult(val, context.ValidationContext);
+                    var result = attribute is AsyncValidationAttribute asyncAttr
+                        ? await asyncAttr.GetValidationResultAsync(val, context.ValidationContext, ct)
+                        : attribute.GetValidationResult(val, context.ValidationContext);
                     if (result is not null && result != ValidationResult.Success && result.ErrorMessage is not null)
                     {
                         var key = errorPrefix.TrimStart('.');

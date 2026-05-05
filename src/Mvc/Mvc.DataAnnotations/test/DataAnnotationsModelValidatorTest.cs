@@ -211,6 +211,39 @@ public class DataAnnotationsModelValidatorTest
     }
 
     [Fact]
+    public async Task ValidateAsync_UsesAsyncValidationAttribute()
+    {
+        // Arrange
+        var metadata = _metadataProvider.GetMetadataForProperty(typeof(string), nameof(string.Length));
+        var attribute = new TestAsyncValidationAttribute
+        {
+            Result = new ValidationResult("Async error", new[] { nameof(string.Length) }),
+        };
+        var validator = new DataAnnotationsModelValidator(
+            new ValidationAttributeAdapterProvider(),
+            attribute,
+            stringLocalizer: null);
+        var validationContext = new ModelValidationContext(
+            actionContext: new ActionContext(),
+            modelMetadata: metadata,
+            metadataProvider: _metadataProvider,
+            container: "Hello",
+            model: 5);
+        var cancellationToken = CancellationToken.None;
+
+        // Act
+        var results = await validator.ValidateAsync(validationContext, cancellationToken);
+
+        // Assert
+        var result = Assert.Single(results);
+        Assert.Empty(result.MemberName);
+        Assert.Equal("Async error", result.Message);
+        Assert.Equal(cancellationToken, attribute.CancellationToken);
+        Assert.Equal(nameof(string.Length), attribute.MemberName);
+        Assert.Equal("Length", attribute.DisplayName);
+    }
+
+    [Fact]
     public void Validate_RequiredButNullAtTopLevel_Invalid()
     {
         // Arrange
@@ -545,6 +578,33 @@ public class DataAnnotationsModelValidatorTest
         }
 
         public abstract ValidationResult IsValidPublic(object value, ValidationContext validationContext);
+    }
+
+    private sealed class TestAsyncValidationAttribute : AsyncValidationAttribute
+    {
+        public CancellationToken CancellationToken { get; private set; }
+
+        public string? DisplayName { get; private set; }
+
+        public string? MemberName { get; private set; }
+
+        public ValidationResult? Result { get; set; }
+
+        public override ValueTask<ValidationResult?> GetValidationResultAsync(
+            object? value,
+            ValidationContext validationContext,
+            CancellationToken cancellationToken = default)
+        {
+            CancellationToken = cancellationToken;
+            DisplayName = validationContext.DisplayName;
+            MemberName = validationContext.MemberName;
+            return new ValueTask<ValidationResult?>(Result);
+        }
+
+        protected override ValidationResult? IsValid(object? value, ValidationContext validationContext)
+        {
+            throw new NotSupportedException();
+        }
     }
 
     private class SampleModel

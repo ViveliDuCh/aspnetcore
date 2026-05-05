@@ -11,7 +11,7 @@ namespace Microsoft.AspNetCore.Mvc.DataAnnotations;
 /// <summary>
 /// Validates based on the given <see cref="ValidationAttribute"/>.
 /// </summary>
-internal sealed class DataAnnotationsModelValidator : IModelValidator
+internal sealed class DataAnnotationsModelValidator : IModelValidator, IAsyncModelValidator
 {
     private static readonly object _emptyValidationContextInstance = new object();
     private readonly IStringLocalizer? _stringLocalizer;
@@ -127,6 +127,93 @@ internal sealed class DataAnnotationsModelValidator : IModelValidator
         }
 
         return Enumerable.Empty<ModelValidationResult>();
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<IReadOnlyList<ModelValidationResult>> ValidateAsync(
+        ModelValidationContext validationContext,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(validationContext);
+        if (validationContext.ModelMetadata is null)
+        {
+            throw new ArgumentException(
+                Resources.FormatPropertyOfTypeCannotBeNull(
+                    nameof(validationContext.ModelMetadata),
+                    typeof(ModelValidationContext)),
+                nameof(validationContext));
+        }
+        if (validationContext.MetadataProvider is null)
+        {
+            throw new ArgumentException(
+                Resources.FormatPropertyOfTypeCannotBeNull(
+                    nameof(validationContext.MetadataProvider),
+                    typeof(ModelValidationContext)),
+                nameof(validationContext));
+        }
+
+        var metadata = validationContext.ModelMetadata;
+        var memberName = metadata.Name;
+        var container = validationContext.Container;
+
+        var context = new ValidationContext(
+            instance: container ?? validationContext.Model ?? _emptyValidationContextInstance,
+            serviceProvider: validationContext.ActionContext?.HttpContext?.RequestServices,
+            items: null)
+        {
+            DisplayName = metadata.GetDisplayName(),
+            MemberName = memberName
+        };
+
+        ValidationResult? result;
+        if (Attribute is AsyncValidationAttribute asyncAttr)
+        {
+            result = await asyncAttr.GetValidationResultAsync(
+                validationContext.Model,
+                context,
+                cancellationToken);
+        }
+        else
+        {
+            result = Attribute.GetValidationResult(validationContext.Model, context);
+        }
+
+        if (result is not null)
+        {
+            string? errorMessage;
+            if (_stringLocalizer != null &&
+                !string.IsNullOrEmpty(Attribute.ErrorMessage) &&
+                string.IsNullOrEmpty(Attribute.ErrorMessageResourceName) &&
+                Attribute.ErrorMessageResourceType == null)
+            {
+                errorMessage = GetErrorMessage(validationContext) ?? result.ErrorMessage;
+            }
+            else
+            {
+                errorMessage = result.ErrorMessage;
+            }
+
+            var validationResults = new List<ModelValidationResult>();
+            if (result.MemberNames is not null)
+            {
+                foreach (var resultMemberName in result.MemberNames)
+                {
+                    var newMemberName = string.Equals(resultMemberName, memberName, StringComparison.Ordinal)
+                        ? null
+                        : resultMemberName;
+                    validationResults.Add(new ModelValidationResult(newMemberName, errorMessage));
+                }
+            }
+
+            if (validationResults.Count == 0)
+            {
+                validationResults.Add(new ModelValidationResult(memberName: null, message: errorMessage));
+            }
+
+            return validationResults;
+        }
+
+        return Array.Empty<ModelValidationResult>();
     }
 
     private string? GetErrorMessage(ModelValidationContextBase validationContext)
