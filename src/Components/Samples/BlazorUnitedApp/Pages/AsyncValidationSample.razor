@@ -1,0 +1,163 @@
+@page "/async-validation"
+@rendermode InteractiveServer
+@implements IDisposable
+@using BlazorUnitedApp.Data
+@using Microsoft.AspNetCore.Components.Forms
+
+<PageTitle>Async Validation — Field + Form Level</PageTitle>
+
+<h1>Async Validation Demo</h1>
+<p>
+    This form combines <strong>field-level</strong> and <strong>form-level</strong> async validation
+    in a single <code>&lt;EditForm&gt;</code>.
+</p>
+<ul>
+    <li><strong>Field-level:</strong> The Email field has <code>[SlowUniqueEmail]</code> — an
+        <code>AsyncValidationAttribute</code> that runs per-field via
+        <code>Validator.TryValidatePropertyAsync</code> on every change. Try <code>taken@@example.com</code>.</li>
+    <li><strong>Form-level:</strong> The model implements <code>IAsyncValidatableObject</code> — a
+        cross-field check that runs on submit via <code>EditContext.ValidateAsync()</code>.
+        Try username <code>admin</code> with a non-admin email.</li>
+</ul>
+
+<hr />
+
+<EditForm EditContext="_editContext" OnValidSubmit="HandleValidSubmit" OnInvalidSubmit="HandleInvalidSubmit">
+    <DataAnnotationsValidator />
+
+    @* ── Name: sync-only field ── *@
+    <div class="mb-3">
+        <label for="name" class="form-label">Name</label>
+        <InputText id="name" @bind-Value="_model.Name" class="form-control" />
+        <ValidationMessage For="() => _model.Name" />
+    </div>
+
+    @* ── Email: sync + async field-level ── *@
+    <div class="mb-3">
+        <label for="email" class="form-label">Email</label>
+        <div class="input-group">
+            <InputText id="email" @bind-Value="_model.Email" class="form-control" />
+            @if (_editContext.IsValidationPending(() => _model.Email))
+            {
+                <span class="input-group-text text-primary">
+                    <span class="spinner-border spinner-border-sm" role="status"></span>
+                    <span class="ms-1">Checking…</span>
+                </span>
+            }
+        </div>
+        <ValidationMessage For="() => _model.Email" />
+        <div class="form-text">
+            Async validator: <code>[SlowUniqueEmail]</code> — simulates 800ms DB lookup.
+            Type <code>taken@@example.com</code> to trigger an async error.
+        </div>
+    </div>
+
+    @* ── Username: sync-only, but cross-checked at form level ── *@
+    <div class="mb-3">
+        <label for="username" class="form-label">Username</label>
+        <InputText id="username" @bind-Value="_model.Username" class="form-control" />
+        <ValidationMessage For="() => _model.Username" />
+        <div class="form-text">
+            Cross-field rule on submit: <code>admin</code> username requires an <code>admin@@</code> email.
+        </div>
+    </div>
+
+    @* ── Age: sync-only range field ── *@
+    <div class="mb-3">
+        <label for="age" class="form-label">Age</label>
+        <InputNumber id="age" @bind-Value="_model.Age" class="form-control" />
+        <ValidationMessage For="() => _model.Age" />
+    </div>
+
+    @* ── Global pending/faulted indicators ── *@
+    @if (_editContext.IsValidationPending())
+    {
+        <div class="alert alert-info py-2">
+            <span class="spinner-border spinner-border-sm me-2" role="status"></span>
+            Async validation in progress…
+        </div>
+    }
+
+    @if (_editContext.IsValidationFaulted())
+    {
+        <div class="alert alert-danger py-2">
+            ⚠️ A validation check failed due to an infrastructure error.
+        </div>
+    }
+
+    @* ── Submit button — disabled while async is pending ── *@
+    <button type="submit" class="btn btn-primary" disabled="@_editContext.IsValidationPending()">
+        @if (_editContext.IsValidationPending())
+        {
+            <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+            @:Validating…
+        }
+        else
+        {
+            @:Submit
+        }
+    </button>
+
+    <ValidationSummary class="mt-3" />
+</EditForm>
+
+@* ── Submit result ── *@
+@if (_submitMessage is not null)
+{
+    <div class="alert @_alertClass mt-3">@_submitMessage</div>
+}
+
+<hr />
+
+<h4>How it works</h4>
+<table class="table table-sm">
+    <thead><tr><th>Level</th><th>Trigger</th><th>Path</th></tr></thead>
+    <tbody>
+        <tr>
+            <td>Field</td>
+            <td>Each field change (blur)</td>
+            <td><code>OnFieldChanged → ValidateFieldWithRuntimeAsync → Validator.TryValidatePropertyAsync</code></td>
+        </tr>
+        <tr>
+            <td>Form</td>
+            <td>Submit button</td>
+            <td><code>EditForm.HandleSubmitAsync → EditContext.ValidateAsync → OnAsyncValidationRequested → Validator.TryValidateObjectAsync / IAsyncValidatableObject</code></td>
+        </tr>
+    </tbody>
+</table>
+
+@code {
+    private readonly RegistrationModel _model = new();
+    private EditContext _editContext = default!;
+    private string? _submitMessage;
+    private string _alertClass = "alert-info";
+
+    protected override void OnInitialized()
+    {
+        _editContext = new EditContext(_model);
+        _editContext.OnValidationStateChanged += OnValidationStateChanged;
+    }
+
+    private void HandleValidSubmit(EditContext editContext)
+    {
+        _submitMessage = $"✅ All validation passed — sync fields, async field-level " +
+                         $"[SlowUniqueEmail], and form-level IAsyncValidatableObject cross-check.";
+        _alertClass = "alert-success";
+    }
+
+    private void HandleInvalidSubmit(EditContext editContext)
+    {
+        _submitMessage = "❌ Validation failed — see errors above.";
+        _alertClass = "alert-danger";
+    }
+
+    private void OnValidationStateChanged(object? sender, ValidationStateChangedEventArgs e)
+    {
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        _editContext.OnValidationStateChanged -= OnValidationStateChanged;
+    }
+}

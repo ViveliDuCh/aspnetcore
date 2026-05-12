@@ -227,6 +227,8 @@ public sealed class EditContext
     /// <returns>True if there are no validation messages after validation; otherwise false.</returns>
     public async Task<bool> ValidateAsync()
     {
+        CancelAllPendingValidationTasks();
+
         if (OnAsyncValidationRequested is not null)
         {
             await OnAsyncValidationRequested.Invoke(this, ValidationRequestedEventArgs.Empty);
@@ -237,6 +239,161 @@ public sealed class EditContext
         }
 
         return !GetValidationMessages().Any();
+    }
+
+    /// <summary>
+    /// Registers an async validation task for a specific field. If there is already
+    /// a pending validation task for the field, it will be cancelled and replaced.
+    /// </summary>
+    /// <param name="fieldIdentifier">Identifies the field being validated.</param>
+    /// <param name="task">The async validation task to track.</param>
+    /// <param name="cts">The <see cref="CancellationTokenSource"/> that can cancel the task.</param>
+    public void AddValidationTask(in FieldIdentifier fieldIdentifier, Task task, CancellationTokenSource cts)
+    {
+        var state = GetOrAddFieldState(fieldIdentifier);
+        if (state.PendingValidationCts is { } previousCts)
+        {
+            previousCts.Cancel();
+            previousCts.Dispose();
+        }
+
+        state.PendingValidationTask = task;
+        state.PendingValidationCts = cts;
+        state.IsValidationFaulted = false;
+        NotifyValidationStateChanged();
+        _ = ObserveValidationTaskAsync(state, task);
+    }
+
+    /// <summary>
+    /// Determines whether the specified field has a pending async validation task.
+    /// </summary>
+    /// <param name="fieldIdentifier">Identifies the field to check.</param>
+    /// <returns>True if the field has a pending validation task; otherwise false.</returns>
+    public bool IsValidationPending(in FieldIdentifier fieldIdentifier)
+        => _fieldStates.TryGetValue(fieldIdentifier, out var state)
+            && state.PendingValidationTask is { IsCompleted: false };
+
+    /// <summary>
+    /// Determines whether the specified field has a pending async validation task.
+    /// </summary>
+    /// <param name="accessor">Identifies the field to check.</param>
+    /// <returns>True if the field has a pending validation task; otherwise false.</returns>
+    public bool IsValidationPending<TField>(Expression<Func<TField>> accessor)
+        => IsValidationPending(FieldIdentifier.Create(accessor));
+
+    /// <summary>
+    /// Determines whether any field in this <see cref="EditContext"/> has a pending async validation task.
+    /// </summary>
+    /// <returns>True if any field has a pending validation task; otherwise false.</returns>
+    public bool IsValidationPending()
+    {
+        foreach (var state in _fieldStates)
+        {
+            if (state.Value.PendingValidationTask is { IsCompleted: false })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Determines whether the specified field's last async validation task faulted.
+    /// </summary>
+    /// <param name="fieldIdentifier">Identifies the field to check.</param>
+    /// <returns>True if the field's last validation task faulted; otherwise false.</returns>
+    public bool IsValidationFaulted(in FieldIdentifier fieldIdentifier)
+        => _fieldStates.TryGetValue(fieldIdentifier, out var state)
+            && state.IsValidationFaulted;
+
+    /// <summary>
+    /// Determines whether the specified field's last async validation task faulted.
+    /// </summary>
+    /// <param name="accessor">Identifies the field to check.</param>
+    /// <returns>True if the field's last validation task faulted; otherwise false.</returns>
+    public bool IsValidationFaulted<TField>(Expression<Func<TField>> accessor)
+        => IsValidationFaulted(FieldIdentifier.Create(accessor));
+
+    /// <summary>
+    /// Determines whether any field in this <see cref="EditContext"/> has a faulted async validation task.
+    /// </summary>
+    /// <returns>True if any field has a faulted validation task; otherwise false.</returns>
+    public bool IsValidationFaulted()
+    {
+        foreach (var state in _fieldStates)
+        {
+            if (state.Value.IsValidationFaulted)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void CancelAllPendingValidationTasks()
+    {
+        foreach (var state in _fieldStates)
+        {
+            if (state.Value.PendingValidationCts is { } cts)
+            {
+                cts.Cancel();
+                cts.Dispose();
+                state.Value.PendingValidationCts = null;
+                state.Value.PendingValidationTask = null;
+            }
+        }
+    }
+
+    private async Task ObserveValidationTaskAsync(FieldState state, Task task)
+    {
+        try
+        {
+            await task;
+
+            // Completed successfully — clear pending state
+            if (ReferenceEquals(state.PendingValidationTask, task))
+            {
+                state.PendingValidationTask = null;
+                if (state.PendingValidationCts is { } cts)
+                {
+                    cts.Dispose();
+                    state.PendingValidationCts = null;
+                }
+
+                NotifyValidationStateChanged();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancelled — silently clear state without notification
+            if (ReferenceEquals(state.PendingValidationTask, task))
+            {
+                state.PendingValidationTask = null;
+                if (state.PendingValidationCts is { } cts)
+                {
+                    cts.Dispose();
+                    state.PendingValidationCts = null;
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Faulted — mark as faulted and notify
+            if (ReferenceEquals(state.PendingValidationTask, task))
+            {
+                state.IsValidationFaulted = true;
+                state.PendingValidationTask = null;
+                if (state.PendingValidationCts is { } cts)
+                {
+                    cts.Dispose();
+                    state.PendingValidationCts = null;
+                }
+
+                NotifyValidationStateChanged();
+            }
+        }
     }
 
     /// <summary>

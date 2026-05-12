@@ -1,0 +1,143 @@
+@implements IDisposable
+@using System.ComponentModel.DataAnnotations
+@using System.Threading
+@using Microsoft.AspNetCore.Components.Forms
+
+<EditForm EditContext="@editContext" OnValidSubmit="@HandleValidSubmit" OnInvalidSubmit="@HandleInvalidSubmit">
+    <DataAnnotationsValidator />
+
+    <p class="name">
+        Name: <InputText id="name-input" @bind-Value="model.Name" />
+        <ValidationMessage For="@(() => model.Name)" />
+    </p>
+
+    <p class="email">
+        Email: <InputText id="email-input" @bind-Value="model.Email" @bind-Value:event="oninput" />
+        <ValidationMessage For="@(() => model.Email)" />
+    </p>
+
+    <p class="age">
+        Age: <InputNumber id="age-input" @bind-Value="model.Age" />
+        <ValidationMessage For="@(() => model.Age)" />
+    </p>
+
+    <div class="all-errors">
+        <ValidationSummary />
+    </div>
+
+    <button id="submit-btn" type="submit">Submit</button>
+</EditForm>
+
+@if (editContext.IsValidationPending())
+{
+    <div class="validation-pending">pending</div>
+}
+
+@if (editContext.IsValidationPending(() => model.Email))
+{
+    <div class="email-pending">pending</div>
+}
+
+@if (editContext.IsValidationFaulted())
+{
+    <div class="validation-faulted">faulted</div>
+}
+
+@if (submitResult is not null)
+{
+    <div class="submit-result">@submitResult</div>
+}
+
+@code {
+#nullable enable
+    private readonly TestModel model = new();
+    private EditContext editContext = default!;
+    private string? submitResult;
+
+    protected override void OnInitialized()
+    {
+        editContext = new EditContext(model);
+        editContext.OnValidationStateChanged += HandleValidationStateChanged;
+    }
+
+    private void HandleValidSubmit(EditContext editContext)
+    {
+        submitResult = "valid";
+    }
+
+    private void HandleInvalidSubmit(EditContext editContext)
+    {
+        submitResult = "invalid";
+    }
+
+    private void HandleValidationStateChanged(object? sender, ValidationStateChangedEventArgs e)
+    {
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        editContext.OnValidationStateChanged -= HandleValidationStateChanged;
+    }
+
+    /// <summary>
+    /// Model with sync attrs, async field-level attr, and IAsyncValidatableObject for form-level.
+    /// </summary>
+    private sealed class TestModel : IAsyncValidatableObject
+    {
+        [Required(ErrorMessage = "Name is required")]
+        public string Name { get; set; } = string.Empty;
+
+        [Required(ErrorMessage = "Email is required")]
+        [SlowValidation]
+        public string Email { get; set; } = string.Empty;
+
+        [Range(1, 120, ErrorMessage = "Age must be between 1 and 120")]
+        public int Age { get; set; } = 25;
+
+        /// <summary>
+        /// Cross-field async validation: "admin" name with age under 21 is rejected.
+        /// Runs only on form submit via ValidateAsync → IAsyncValidatableObject.
+        /// </summary>
+        public async ValueTask<IEnumerable<ValidationResult>> ValidateAsync(
+            ValidationContext validationContext,
+            CancellationToken cancellationToken)
+        {
+            await Task.Delay(100, cancellationToken);
+
+            var results = new List<ValidationResult>();
+            if (string.Equals(Name, "admin", StringComparison.OrdinalIgnoreCase) && Age < 21)
+            {
+                results.Add(new ValidationResult(
+                    "Admin users must be at least 21",
+                    new[] { nameof(Name), nameof(Age) }));
+            }
+
+            return results;
+        }
+    }
+
+    [AttributeUsage(AttributeTargets.Property | AttributeTargets.Field, AllowMultiple = false)]
+    public sealed class SlowValidationAttribute : AsyncValidationAttribute
+    {
+        public static int DelayMs { get; set; } = 500;
+
+        protected override async ValueTask<ValidationResult?> IsValidAsync(
+            object? value,
+            ValidationContext validationContext,
+            CancellationToken cancellationToken)
+        {
+            if (value is not string email || string.IsNullOrWhiteSpace(email))
+            {
+                return ValidationResult.Success;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Max(DelayMs, 0)), cancellationToken);
+
+            return string.Equals(email, "taken@test.com", StringComparison.OrdinalIgnoreCase)
+                ? new ValidationResult("Email is not available")
+                : ValidationResult.Success;
+        }
+    }
+#nullable restore
+}

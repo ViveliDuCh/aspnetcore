@@ -67,6 +67,7 @@ public static partial class EditContextDataAnnotationsExtensions
                 : null;
 #pragma warning restore ASP0029 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
             _editContext.OnFieldChanged += OnFieldChanged;
+            _editContext.OnValidationRequested += OnValidationRequested;
             _editContext.OnAsyncValidationRequested += OnAsyncValidationRequested;
 
             if (MetadataUpdater.IsSupported)
@@ -75,31 +76,78 @@ public static partial class EditContextDataAnnotationsExtensions
             }
         }
 
+        // ── Field-level: async via Validator.TryValidatePropertyAsync ──
+
         [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Model types are expected to be defined in assemblies that do not get trimmed.")]
         private void OnFieldChanged(object? sender, FieldChangedEventArgs eventArgs)
         {
             var fieldIdentifier = eventArgs.FieldIdentifier;
+
+            // Use core runtime Validator.TryValidatePropertyAsync() which handles both
+            // sync and async attributes correctly via two-phase execution:
+            // Phase 1 runs all sync attributes; Phase 2 runs async only if sync passed.
             if (TryGetValidatableProperty(fieldIdentifier, out var propertyInfo))
             {
-                var propertyValue = propertyInfo.GetValue(fieldIdentifier.Model);
-                var validationContext = new ValidationContext(fieldIdentifier.Model, _serviceProvider, items: null)
-                {
-                    MemberName = propertyInfo.Name
-                };
-                var results = new List<ValidationResult>();
+                var cts = new CancellationTokenSource();
+                var task = ValidateFieldWithRuntimeAsync(fieldIdentifier, propertyInfo, cts.Token);
 
-                Validator.TryValidateProperty(propertyValue, validationContext, results);
-                _messages.Clear(fieldIdentifier);
-                foreach (var result in CollectionsMarshal.AsSpan(results))
+                if (task.IsCompleted)
                 {
-                    _messages.Add(fieldIdentifier, result.ErrorMessage!);
+                    // Sync-only attributes — completed immediately, no async tracking needed
+                    cts.Dispose();
                 }
-
-                // We have to notify even if there were no messages before and are still no messages now,
-                // because the "state" that changed might be the completion of some async validation task
-                _editContext.NotifyValidationStateChanged();
+                else
+                {
+                    // Truly async — clear messages immediately to show neutral state
+                    // while async validation runs, then track the pending task
+                    _messages.Clear(fieldIdentifier);
+                    _editContext.NotifyValidationStateChanged();
+                    _editContext.AddValidationTask(fieldIdentifier, task, cts);
+                }
             }
         }
+
+        /// <summary>
+        /// Field-level async validation using core runtime Validator.TryValidatePropertyAsync().
+        /// Mirrors the form-level async pattern. When all attributes are synchronous, this
+        /// completes synchronously with zero async overhead.
+        /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Model types are expected to be defined in assemblies that do not get trimmed.")]
+        private async Task ValidateFieldWithRuntimeAsync(
+            FieldIdentifier fieldIdentifier,
+            PropertyInfo reflectedProperty,
+            CancellationToken cancellationToken)
+        {
+            var propertyValue = reflectedProperty.GetValue(fieldIdentifier.Model);
+            var validationContext = new ValidationContext(
+                fieldIdentifier.Model, _serviceProvider, items: null)
+            {
+                MemberName = reflectedProperty.Name
+            };
+            var results = new List<ValidationResult>();
+
+            try
+            {
+                await Validator.TryValidatePropertyAsync(
+                    propertyValue, validationContext, results, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                _messages.Clear(fieldIdentifier);
+                _editContext.NotifyValidationStateChanged();
+                return;
+            }
+
+            _messages.Clear(fieldIdentifier);
+            foreach (var result in CollectionsMarshal.AsSpan(results))
+            {
+                _messages.Add(fieldIdentifier, result.ErrorMessage!);
+            }
+
+            _editContext.NotifyValidationStateChanged();
+        }
+
+        // ── Form-level: sync handler for Validate(), async handler for ValidateAsync() ──
 
         [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Model types are expected to be defined in assemblies that do not get trimmed.")]
         private void OnValidationRequested(object? sender, ValidationRequestedEventArgs e)
@@ -127,6 +175,8 @@ public static partial class EditContextDataAnnotationsExtensions
             _editContext.NotifyValidationStateChanged();
         }
 
+        // ── Sync form-level validators (for Validate()) ──
+
         [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Model types are expected to be defined in assemblies that do not get trimmed.")]
         private void ValidateWithDefaultValidator(ValidationContext validationContext)
         {
@@ -137,38 +187,7 @@ public static partial class EditContextDataAnnotationsExtensions
             _messages.Clear();
             foreach (var validationResult in validationResults)
             {
-                if (validationResult == null)
-                {
-                    continue;
-                }
-
-                var hasMemberNames = false;
-                foreach (var memberName in validationResult.MemberNames)
-                {
-                    hasMemberNames = true;
-                    _messages.Add(_editContext.Field(memberName), validationResult.ErrorMessage!);
-                }
-
-                if (!hasMemberNames)
-                {
-                    _messages.Add(new FieldIdentifier(_editContext.Model, fieldName: string.Empty), validationResult.ErrorMessage!);
-                }
-            }
-        }
-
-        [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Model types are expected to be defined in assemblies that do not get trimmed.")]
-        private async Task ValidateWithDefaultValidatorAsync(ValidationContext validationContext)
-        {
-            var validationResults = new List<ValidationResult>();
-            await Validator.TryValidateObjectAsync(
-                _editContext.Model, validationContext, validationResults,
-                validateAllProperties: true, CancellationToken.None);
-
-            // Transfer results to the ValidationMessageStore
-            _messages.Clear();
-            foreach (var validationResult in validationResults)
-            {
-                if (validationResult == null)
+                if (validationResult is null)
                 {
                     continue;
                 }
@@ -207,7 +226,7 @@ public static partial class EditContextDataAnnotationsExtensions
                 var validationTask = _validatorTypeInfo.ValidateAsync(_editContext.Model, validateContext, CancellationToken.None);
                 if (!validationTask.IsCompleted)
                 {
-                    throw new InvalidOperationException("Async validation is not supported");
+                    throw new InvalidOperationException("Async validation is not supported in the synchronous Validate() path. Use ValidateAsync() instead.");
                 }
 
                 var validationErrors = validateContext.ValidationErrors;
@@ -235,6 +254,39 @@ public static partial class EditContextDataAnnotationsExtensions
             }
 
             return true;
+        }
+
+        // ── Async form-level validators (for ValidateAsync()) ──
+
+        [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Model types are expected to be defined in assemblies that do not get trimmed.")]
+        private async Task ValidateWithDefaultValidatorAsync(ValidationContext validationContext)
+        {
+            var validationResults = new List<ValidationResult>();
+            await Validator.TryValidateObjectAsync(
+                _editContext.Model, validationContext, validationResults,
+                validateAllProperties: true, CancellationToken.None);
+
+            // Transfer results to the ValidationMessageStore
+            _messages.Clear();
+            foreach (var validationResult in validationResults)
+            {
+                if (validationResult is null)
+                {
+                    continue;
+                }
+
+                var hasMemberNames = false;
+                foreach (var memberName in validationResult.MemberNames)
+                {
+                    hasMemberNames = true;
+                    _messages.Add(_editContext.Field(memberName), validationResult.ErrorMessage!);
+                }
+
+                if (!hasMemberNames)
+                {
+                    _messages.Add(new FieldIdentifier(_editContext.Model, fieldName: string.Empty), validationResult.ErrorMessage!);
+                }
+            }
         }
 
 #pragma warning disable ASP0029 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
@@ -290,6 +342,7 @@ public static partial class EditContextDataAnnotationsExtensions
         {
             _messages.Clear();
             _editContext.OnFieldChanged -= OnFieldChanged;
+            _editContext.OnValidationRequested -= OnValidationRequested;
             _editContext.OnAsyncValidationRequested -= OnAsyncValidationRequested;
             _editContext.NotifyValidationStateChanged();
 
