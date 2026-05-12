@@ -139,7 +139,7 @@ public partial class ParameterBinder
         {
             Log.AttemptingToValidateParameterOrProperty(Logger, parameter, metadata);
 
-            EnforceBindRequiredAndValidate(
+            await EnforceBindRequiredAndValidateAsync(
                 baseObjectValidator,
                 actionContext,
                 parameter,
@@ -154,7 +154,8 @@ public partial class ParameterBinder
         {
             // For legacy implementations (which directly implemented IObjectModelValidator), fall back to the
             // back-compatibility logic. In this scenario, top-level validation attributes will be ignored like
-            // they were historically.
+            // they were historically. We keep the sync call here because legacy implementations may not
+            // override the ValidateAsync DIM.
             if (modelBindingResult.IsModelSet)
             {
                 _objectModelValidator.Validate(
@@ -168,6 +169,7 @@ public partial class ParameterBinder
         return modelBindingResult;
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0051:Remove unused private members", Justification = "Retained for compatibility with the synchronous validation path.")]
     private void EnforceBindRequiredAndValidate(
         ObjectModelValidator baseObjectValidator,
         ActionContext actionContext,
@@ -226,6 +228,69 @@ public partial class ParameterBinder
                 modelBindingResult.Model,
                 metadata,
                 container);
+        }
+    }
+
+    private async Task EnforceBindRequiredAndValidateAsync(
+        ObjectModelValidator baseObjectValidator,
+        ActionContext actionContext,
+        ParameterDescriptor parameter,
+        ModelMetadata metadata,
+        ModelBindingContext modelBindingContext,
+        ModelBindingResult modelBindingResult,
+        object? container)
+    {
+        RecalculateModelMetadata(parameter, modelBindingResult, ref metadata);
+
+        if (!modelBindingResult.IsModelSet && metadata.IsBindingRequired)
+        {
+            // Enforce BindingBehavior.Required (e.g., [BindRequired])
+            var modelName = modelBindingContext.FieldName;
+            var message = metadata.ModelBindingMessageProvider.MissingBindRequiredValueAccessor(modelName);
+            actionContext.ModelState.TryAddModelError(modelName, message);
+        }
+        else if (modelBindingResult.IsModelSet)
+        {
+            // Enforce any other validation rules
+            await baseObjectValidator.ValidateAsync(
+                actionContext,
+                modelBindingContext.ValidationState,
+                modelBindingContext.ModelName,
+                modelBindingResult.Model,
+                metadata,
+                container,
+                cancellationToken: default);
+        }
+        else if (metadata.IsRequired)
+        {
+            // We need to special case the model name for cases where a 'fallback' to empty
+            // prefix occurred but binding wasn't successful. For these cases there will be no
+            // entry in validation state to match and determine the correct key.
+            //
+            // See https://github.com/aspnet/Mvc/issues/7503
+            //
+            // This is to avoid adding validation errors for an 'empty' prefix when a simple
+            // type fails to bind. The fix for #7503 uncovered this issue, and was likely the
+            // original problem being worked around that regressed #7503.
+            var modelName = modelBindingContext.ModelName;
+
+            if (string.IsNullOrEmpty(modelBindingContext.ModelName) &&
+                parameter.BindingInfo?.BinderModelName == null)
+            {
+                // If we get here then this is a fallback case. The model name wasn't explicitly set
+                // and we ended up with an empty prefix.
+                modelName = modelBindingContext.FieldName;
+            }
+
+            // Run validation, we expect this to validate [Required].
+            await baseObjectValidator.ValidateAsync(
+                actionContext,
+                modelBindingContext.ValidationState,
+                modelName,
+                modelBindingResult.Model,
+                metadata,
+                container,
+                cancellationToken: default);
         }
     }
 

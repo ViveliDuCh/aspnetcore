@@ -52,6 +52,25 @@ public abstract class ObjectModelValidator : IObjectModelValidator
         visitor.Validate(metadata, prefix, model, alwaysValidateAtTopLevel: false);
     }
 
+    /// <inheritdoc />
+    public virtual async Task ValidateAsync(
+        ActionContext actionContext,
+        ValidationStateDictionary? validationState,
+        string? prefix,
+        object? model,
+        CancellationToken cancellationToken)
+    {
+        var visitor = GetValidationVisitor(
+            actionContext,
+            _validatorProvider,
+            _validatorCache,
+            _modelMetadataProvider,
+            validationState);
+
+        var metadata = model == null ? null : _modelMetadataProvider.GetMetadataForType(model.GetType());
+        await visitor.ValidateAsync(metadata, prefix, model, alwaysValidateAtTopLevel: false, container: null, cancellationToken);
+    }
+
     /// <summary>
     /// Validates the provided object model.
     /// If <paramref name="model"/> is <see langword="null"/> and the <paramref name="metadata"/>'s
@@ -71,6 +90,29 @@ public abstract class ObjectModelValidator : IObjectModelValidator
         object? model,
         ModelMetadata metadata)
         => Validate(actionContext, validationState, prefix, model, metadata, container: null);
+
+    /// <summary>
+    /// Validates the provided object model.
+    /// If <paramref name="model"/> is <see langword="null"/> and the <paramref name="metadata"/>'s
+    /// <see cref="ModelMetadata.IsRequired"/> is <see langword="true"/>, will add one or more
+    /// model state errors that <see cref="ValidateAsync(ActionContext, ValidationStateDictionary, string, object, CancellationToken)"/>
+    /// would not.
+    /// </summary>
+    /// <param name="actionContext">The <see cref="ActionContext"/>.</param>
+    /// <param name="validationState">The <see cref="ValidationStateDictionary"/>.</param>
+    /// <param name="prefix">The model prefix key.</param>
+    /// <param name="model">The model object.</param>
+    /// <param name="metadata">The <see cref="ModelMetadata"/>.</param>
+    /// <param name="cancellationToken">The <see cref="CancellationToken"/> to observe.</param>
+    /// <returns>A <see cref="Task"/> that represents the asynchronous validation operation.</returns>
+    public virtual Task ValidateAsync(
+        ActionContext actionContext,
+        ValidationStateDictionary? validationState,
+        string? prefix,
+        object? model,
+        ModelMetadata metadata,
+        CancellationToken cancellationToken)
+        => ValidateAsync(actionContext, validationState, prefix, model, metadata, container: null, cancellationToken);
 
     /// <summary>
     /// Validates the provided object model.
@@ -101,6 +143,40 @@ public abstract class ObjectModelValidator : IObjectModelValidator
             validationState);
 
         visitor.Validate(metadata, prefix, model, alwaysValidateAtTopLevel: metadata.IsRequired, container);
+    }
+
+    /// <summary>
+    /// Validates the provided object model.
+    /// If <paramref name="model"/> is <see langword="null"/> and the <paramref name="metadata"/>'s
+    /// <see cref="ModelMetadata.IsRequired"/> is <see langword="true"/>, will add one or more
+    /// model state errors that <see cref="ValidateAsync(ActionContext, ValidationStateDictionary, string, object, CancellationToken)"/>
+    /// would not.
+    /// </summary>
+    /// <param name="actionContext">The <see cref="ActionContext"/>.</param>
+    /// <param name="validationState">The <see cref="ValidationStateDictionary"/>.</param>
+    /// <param name="prefix">The model prefix key.</param>
+    /// <param name="model">The model object.</param>
+    /// <param name="metadata">The <see cref="ModelMetadata"/>.</param>
+    /// <param name="container">The model container</param>
+    /// <param name="cancellationToken">The <see cref="CancellationToken"/> to observe.</param>
+    /// <returns>A <see cref="Task"/> that represents the asynchronous validation operation.</returns>
+    public virtual async Task ValidateAsync(
+        ActionContext actionContext,
+        ValidationStateDictionary? validationState,
+        string? prefix,
+        object? model,
+        ModelMetadata metadata,
+        object? container,
+        CancellationToken cancellationToken)
+    {
+        var visitor = GetValidationVisitor(
+            actionContext,
+            _validatorProvider,
+            _validatorCache,
+            _modelMetadataProvider,
+            validationState);
+
+        await visitor.ValidateAsync(metadata, prefix, model, alwaysValidateAtTopLevel: metadata.IsRequired, container, cancellationToken);
     }
 
     /// <summary>

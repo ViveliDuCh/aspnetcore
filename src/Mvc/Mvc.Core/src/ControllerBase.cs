@@ -2839,4 +2839,30 @@ public abstract class ControllerBase
             model: model);
         return ModelState.IsValid;
     }
+
+    /// <summary>
+    /// Validates the specified <paramref name="model"/> instance asynchronously,
+    /// supporting async validation attributes and async validatable objects.
+    /// </summary>
+    /// <param name="model">The model to validate.</param>
+    /// <param name="prefix">The key to use when looking up information in <see cref="ModelState"/>.</param>
+    /// <param name="cancellationToken">A <see cref="CancellationToken"/> to observe.</param>
+    /// <returns><c>true</c> if the <see cref="ModelState"/> is valid; <c>false</c> otherwise.</returns>
+    [NonAction]
+    public virtual async Task<bool> TryValidateModelAsync(
+        object model,
+        string? prefix = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+
+        await ObjectValidator.ValidateAsync(
+            ControllerContext,
+            validationState: null,
+            prefix: prefix ?? string.Empty,
+            model: model,
+            cancellationToken);
+
+        return ModelState.IsValid;
+    }
 }

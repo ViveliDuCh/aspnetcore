@@ -608,4 +608,254 @@ public class ValidationVisitor
             _visitor.Strategy = _strategy;
         }
     }
+
+    /// <summary>
+    /// Validates an object asynchronously.
+    /// </summary>
+    /// <param name="metadata">The <see cref="ModelMetadata"/> associated with the model.</param>
+    /// <param name="key">The model prefix key.</param>
+    /// <param name="model">The model object.</param>
+    /// <param name="alwaysValidateAtTopLevel">If <see langword="true"/>, applies validation rules even if the top-level value is <see langword="null"/>.</param>
+    /// <param name="container">The model container.</param>
+    /// <param name="cancellationToken">The <see cref="CancellationToken"/> to observe.</param>
+    /// <returns><c>true</c> if the object is valid, otherwise <c>false</c>.</returns>
+    public virtual async ValueTask<bool> ValidateAsync(
+        ModelMetadata? metadata,
+        string? key,
+        object? model,
+        bool alwaysValidateAtTopLevel,
+        object? container = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (container != null && metadata!.MetadataKind != ModelMetadataKind.Property)
+        {
+            throw new ArgumentException(Resources.FormatValidationVisitor_ContainerCannotBeSpecified(metadata.MetadataKind));
+        }
+
+        if (model == null && key != null && !alwaysValidateAtTopLevel)
+        {
+            var entry = ModelState[key];
+
+            // Rationale: We might see the same model state key for two different objects and want to preserve any
+            // known invalidity.
+            if (entry != null && entry.ValidationState != ModelValidationState.Invalid)
+            {
+                entry.ValidationState = ModelValidationState.Valid;
+            }
+
+            return true;
+        }
+
+        // Container is non-null only when validation top-level properties. Start off by treating "container" as the "Model" instance.
+        // Invoking StateManager.Recurse later in this invocation will result in it being correctly used as the container instance during the
+        // validation of "model".
+        Model = container;
+        return await VisitAsync(metadata!, key, model, cancellationToken);
+    }
+
+    /// <summary>
+    /// Validate something in a model asynchronously.
+    /// </summary>
+    /// <param name="metadata">The model metadata.</param>
+    /// <param name="key">The key to validate.</param>
+    /// <param name="model">The model to validate.</param>
+    /// <param name="cancellationToken">The <see cref="CancellationToken"/> to observe.</param>
+    /// <see langword="true"/> if the specified model key is valid, otherwise <see langword="false"/>.
+    /// <returns>Whether the the specified model key is valid.</returns>
+    protected virtual async ValueTask<bool> VisitAsync(
+        ModelMetadata metadata,
+        string? key,
+        object? model,
+        CancellationToken cancellationToken = default)
+    {
+        RuntimeHelpers.EnsureSufficientExecutionStack();
+
+        if (model != null && !_currentPath.Push(model))
+        {
+            // This is a cycle, bail.
+            return true;
+        }
+
+        bool result;
+        try
+        {
+            // Throws InvalidOperationException if the object graph is too deep
+            result = await VisitImplementationAsync(metadata, key, model, cancellationToken);
+        }
+        finally
+        {
+            _currentPath.Pop(model);
+        }
+
+        return result;
+    }
+
+    private async ValueTask<bool> VisitImplementationAsync(
+        ModelMetadata metadata,
+        string? key,
+        object? model,
+        CancellationToken cancellationToken)
+    {
+        if (MaxValidationDepth != null && _currentPath.Count > MaxValidationDepth)
+        {
+            // Non cyclic but too deep an object graph.
+
+            string message;
+            switch (metadata.MetadataKind)
+            {
+                case ModelMetadataKind.Property:
+                    message = Resources.FormatValidationVisitor_ExceededMaxPropertyDepth(nameof(ValidationVisitor), MaxValidationDepth, metadata.Name, metadata.ContainerType);
+                    break;
+
+                default:
+                    // Since the minimum depth is never 0, MetadataKind can never be Parameter. Consequently we only special case MetadataKind.Property.
+                    message = Resources.FormatValidationVisitor_ExceededMaxDepth(nameof(ValidationVisitor), MaxValidationDepth, metadata.ModelType);
+                    break;
+            }
+
+            message += " " + Resources.FormatValidationVisitor_ExceededMaxDepthFix(nameof(MvcOptions), nameof(MvcOptions.MaxValidationDepth));
+            throw new InvalidOperationException(message)
+            {
+                HelpLink = "https://aka.ms/AA21ue1",
+            };
+        }
+
+        var entry = GetValidationEntry(model);
+        key = entry?.Key ?? key ?? string.Empty;
+        metadata = entry?.Metadata ?? metadata;
+        var strategy = entry?.Strategy;
+
+        if (ModelState.HasReachedMaxErrors)
+        {
+            SuppressValidation(key);
+            return false;
+        }
+        else if (entry != null && entry.SuppressValidation)
+        {
+            // Use the key on the entry, because we might not have entries in model state.
+            SuppressValidation(entry.Key);
+            return true;
+        }
+        // If the metadata indicates that no validators exist AND the aggregate state for the key says that the model graph
+        // is not invalid (i.e. is one of Unvalidated, Valid, or Skipped) we can safely mark the graph as valid.
+        else if (metadata.HasValidators == false &&
+            ModelState.GetFieldValidationState(key) != ModelValidationState.Invalid)
+        {
+            if (metadata.BoundConstructor != null)
+            {
+                metadata.ThrowIfRecordTypeHasValidationOnProperties();
+            }
+
+            // No validators will be created for this graph of objects. Mark it as valid if it wasn't previously validated.
+            var entries = ModelState.FindKeysWithPrefix(key);
+            foreach (var item in entries)
+            {
+                if (item.Value.ValidationState == ModelValidationState.Unvalidated)
+                {
+                    item.Value.ValidationState = ModelValidationState.Valid;
+                }
+            }
+
+            return true;
+        }
+
+        using (StateManager.Recurse(this, key ?? string.Empty, metadata, model, strategy!))
+        {
+            if (Metadata!.IsEnumerableType)
+            {
+                return await VisitComplexTypeAsync(DefaultCollectionValidationStrategy.Instance, cancellationToken);
+            }
+
+            if (Metadata.IsComplexType)
+            {
+                return await VisitComplexTypeAsync(DefaultComplexObjectValidationStrategy.Instance, cancellationToken);
+            }
+
+            return await VisitSimpleTypeAsync(cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Validate complex types asynchronously, this covers everything VisitSimpleTypeAsync does not i.e. both enumerations and complex types.
+    /// </summary>
+    /// <param name="defaultStrategy">The default validation strategy to use.</param>
+    /// <param name="cancellationToken">The <see cref="CancellationToken"/> to observe.</param>
+    /// <returns><see langword="true" /> if valid, otherwise <see langword="false" />.</returns>
+    protected virtual async ValueTask<bool> VisitComplexTypeAsync(
+        IValidationStrategy defaultStrategy,
+        CancellationToken cancellationToken = default)
+    {
+        var isValid = true;
+
+        if (Model != null && Metadata!.ValidateChildren)
+        {
+            var strategy = Strategy ?? defaultStrategy;
+            isValid = await VisitChildrenAsync(strategy, cancellationToken);
+        }
+        else if (Model != null)
+        {
+            // Suppress validation for the entries matching this prefix. This will temporarily set
+            // the current node to 'skipped' but we're going to visit it right away, so subsequent
+            // code will set it to 'valid' or 'invalid'
+            SuppressValidation(Key!);
+        }
+
+        // Double-checking HasReachedMaxErrors just in case this model has no properties.
+        // If validation has failed for any children, only validate the parent if ValidateComplexTypesIfChildValidationFails is true.
+        if ((isValid || ValidateComplexTypesIfChildValidationFails) && !ModelState.HasReachedMaxErrors)
+        {
+            isValid &= await ValidateNodeAsync(cancellationToken);
+        }
+
+        return isValid;
+    }
+
+    /// <summary>
+    /// Validate a simple type asynchronously.
+    /// </summary>
+    /// <param name="cancellationToken">The <see cref="CancellationToken"/> to observe.</param>
+    /// <returns><see langword="true" /> if valid, otherwise <see langword="false" />.</returns>
+    protected virtual async ValueTask<bool> VisitSimpleTypeAsync(CancellationToken cancellationToken = default)
+    {
+        if (ModelState.HasReachedMaxErrors)
+        {
+            SuppressValidation(Key!);
+            return false;
+        }
+
+        return await ValidateNodeAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Validate all the child nodes asynchronously using the specified strategy.
+    /// </summary>
+    /// <param name="strategy">The validation strategy.</param>
+    /// <param name="cancellationToken">The <see cref="CancellationToken"/> to observe.</param>
+    /// <returns><see langword="true" /> if all children are valid, otherwise <see langword="false" />.</returns>
+    protected virtual async ValueTask<bool> VisitChildrenAsync(
+        IValidationStrategy strategy,
+        CancellationToken cancellationToken = default)
+    {
+        Debug.Assert(Metadata is not null && Key is not null && Model is not null);
+
+        var isValid = true;
+        var enumerator = strategy.GetChildren(Metadata, Key, Model);
+        var parentEntry = new ValidationEntry(Metadata, Key, Model);
+
+        while (enumerator.MoveNext())
+        {
+            var entry = enumerator.Current;
+            var metadata = entry.Metadata;
+            var key = entry.Key;
+            if (metadata.PropertyValidationFilter?.ShouldValidateEntry(entry, parentEntry) == false)
+            {
+                SuppressValidation(key);
+                continue;
+            }
+
+            isValid &= await VisitAsync(metadata, key, entry.Model, cancellationToken);
+        }
+
+        return isValid;
+    }
 }
